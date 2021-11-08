@@ -48,6 +48,7 @@ type RecConn struct {
 	NonVerbose bool
 
 	isConnected bool
+	terminated  bool
 	mu          sync.RWMutex
 	url         string
 	reqHeader   http.Header
@@ -72,6 +73,13 @@ func (rc *RecConn) setIsConnected(state bool) {
 	rc.isConnected = state
 }
 
+func (rc *RecConn) isTerminated() bool {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+
+	return rc.terminated
+}
+
 func (rc *RecConn) getConn() *websocket.Conn {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
@@ -89,6 +97,21 @@ func (rc *RecConn) Close() {
 	}
 
 	rc.setIsConnected(false)
+}
+
+// Terminate closes the underlying network connection
+// AND ensures that no
+func (rc *RecConn) Terminate() {
+	if rc.getConn() != nil {
+		rc.mu.Lock()
+		rc.Conn.Close()
+		rc.mu.Unlock()
+	}
+
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.isConnected = false
+	rc.terminated = true
 }
 
 // ReadMessage is a helper method for getting a reader
@@ -390,6 +413,9 @@ func (rc *RecConn) keepAlive() {
 }
 
 func (rc *RecConn) connect() {
+	if rc.isTerminated() {
+		return
+	}
 	b := rc.getBackoff()
 	rand.Seed(time.Now().UTC().UnixNano())
 
