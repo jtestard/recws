@@ -3,6 +3,7 @@
 package recws
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"log"
@@ -22,6 +23,7 @@ var ErrNotConnected = errors.New("websocket: not connected")
 
 // The RecConn type represents a Reconnecting WebSocket connection.
 type RecConn struct {
+	ID string
 	// RecIntvlMin specifies the initial reconnecting interval,
 	// default to 2 seconds
 	RecIntvlMin time.Duration
@@ -47,6 +49,9 @@ type RecConn struct {
 	// NonVerbose suppress connecting/reconnecting messages.
 	NonVerbose bool
 
+	ctx context.Context
+	cancelFunc context.CancelFunc
+	connectCount int
 	isConnected bool
 	terminated  bool
 	mu          sync.RWMutex
@@ -96,6 +101,9 @@ func (rc *RecConn) Close() {
 		rc.mu.Unlock()
 	}
 
+	if rc.IsConnected() && rc.cancelFunc != nil {
+		rc.cancelFunc()
+	}
 	rc.setIsConnected(false)
 }
 
@@ -400,7 +408,7 @@ func (rc *RecConn) keepAlive() {
 			}
 
 			if err := rc.writeControlPingMessage(); err != nil {
-				log.Println(err)
+				log.Println(rc.ID, err)
 			}
 
 			<-ticker.C
@@ -416,10 +424,13 @@ func (rc *RecConn) connect() {
 	if rc.isTerminated() {
 		return
 	}
+	rc.ctx, rc.cancelFunc = context.WithCancel(context.Background())
 	b := rc.getBackoff()
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	for {
+	doIter := func() {
+		rc.connectCount++
+		log.Printf(rc.ID, "Connection count is %d", rc.connectCount)
 		nextItvl := b.Duration()
 		wsConn, httpResp, err := rc.dialer.Dial(rc.url, rc.reqHeader)
 
@@ -432,31 +443,41 @@ func (rc *RecConn) connect() {
 
 		if err == nil {
 			if !rc.getNonVerbose() {
-				log.Printf("Dial: connection was successfully established with %s\n", rc.url)
+				log.Printf("%s Dial: connection was successfully established with %s\n", rc.ID, rc.url)
 			}
 
 			if rc.hasSubscribeHandler() {
 				if err := rc.SubscribeHandler(); err != nil {
-					log.Fatalf("Dial: connect handler failed with %s", err.Error())
+					log.Fatalf("%s Dial: connect handler failed with %s", rc.ID, err.Error())
 				}
 				if !rc.getNonVerbose() {
-					log.Printf("Dial: connect handler was successfully established with %s\n", rc.url)
+					log.Printf("%s Dial: connect handler was successfully established with %s\n", rc.ID, rc.url)
 				}
 			}
 
 			if rc.getKeepAliveTimeout() != 0 {
 				rc.keepAlive()
 			}
-		
+
 			return
 		}
 
 		if !rc.getNonVerbose() {
 			log.Println(err)
-			log.Println("Dial: will try again in", nextItvl, "seconds.")
+			log.Printf("%s Dial: will try again in", nextItvl, "seconds.", rc.ID, )
 		}
 
 		time.Sleep(nextItvl)
+	}
+
+	for {
+		select {
+		case <- rc.ctx.Done():
+			log.Printf("%s Dial: connection cancelled for recws", rc.ID, )
+			return
+		default:
+			doIter()
+		}
 	}
 }
 
